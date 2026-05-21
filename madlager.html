@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Madlager</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue, set, remove, push } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ─────────────────────────────────────────────
+// OPSÆTNING: Erstat disse værdier med dine egne
+// fra Firebase Console → Project Settings
+// ─────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "DIN_API_KEY",
+  authDomain: "DIT_PROJEKT.firebaseapp.com",
+  databaseURL: "https://DIT_PROJEKT-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "DIT_PROJEKT",
+  storageBucket: "DIT_PROJEKT.appspot.com",
+  messagingSenderId: "DIN_SENDER_ID",
+  appId: "DIN_APP_ID"
+};
+// ─────────────────────────────────────────────
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+const DEFAULT_CATS = [
+  { id:"groent",    name:"Grøntsager", emoji:"🥦", color:"#60d4a0" },
+  { id:"koed",      name:"Kød",        emoji:"🥩", color:"#f07860" },
+  { id:"tilbehoer", name:"Tilbehør",   emoji:"🧂", color:"#c060f0" },
+  { id:"drikke",    name:"Drikkevare", emoji:"🧃", color:"#60b8f0" },
+  { id:"mejeri",    name:"Mejeri",     emoji:"🥛", color:"#f0e060" },
+  { id:"andet",     name:"Andet",      emoji:"📦", color:"#a0a09a" },
+];
+
+let allItems = {};
+let cats = [...DEFAULT_CATS];
+let activeTab = "alle";
+let logoTaps = 0, logoTimer = null;
+
+// ── FIREBASE LISTENERS ──────────────────────
+onValue(ref(db, "items"), snap => {
+  allItems = snap.val() || {};
+  renderList();
+  renderStats();
+  renderAlert();
+  document.getElementById("syncTime").textContent = new Date().toLocaleTimeString("da-DK",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+});
+
+onValue(ref(db, "cats"), snap => {
+  const saved = snap.val();
+  if (saved) cats = Object.values(saved);
+  renderTabs();
+  renderCatGrid();
+  renderList();
+});
+
+// ── HELPERS ─────────────────────────────────
+function daysUntil(dateStr) {
+  const t = new Date(); t.setHours(0,0,0,0);
+  return Math.round((new Date(dateStr+"T00:00:00") - t) / 86400000);
+}
+function expiryColor(days, frozen) {
+  if (frozen) return "#60b8f0";
+  if (days < 0) return "#f06060";
+  if (days <= 3) return "#f0c860";
+  return "#c8f060";
+}
+function expiryLabel(days, frozen) {
+  if (frozen) return "❄️ På frost";
+  if (days < 0) return `Udløbet for ${Math.abs(days)}d!`;
+  if (days === 0) return "Udløber i dag!";
+  if (days === 1) return "Udløber i morgen";
+  if (days <= 3) return `Om ${days} dage`;
+  return `${days} dage`;
+}
+function getCat(id) {
+  return cats.find(c=>c.id===id) || { emoji:"📦", color:"#a0a09a", name:"Andet" };
+}
+function sortedItems() {
+  return Object.entries(allItems)
+    .map(([key,v])=>({...v, _key:key}))
+    .sort((a,b)=>{
+      if (a.frozen && !b.frozen) return 1;
+      if (!a.frozen && b.frozen) return -1;
+      return (a.date||"").localeCompare(b.date||"");
+    });
+}
+
+// ── RENDER ───────────────────────────────────
+function renderStats() {
+  const arr = sortedItems();
+  const exp  = arr.filter(i=>!i.frozen&&daysUntil(i.date)<0).length;
+  const soon = arr.filter(i=>!i.frozen&&daysUntil(i.date)>=0&&daysUntil(i.date)<=3).length;
+  const froz = arr.filter(i=>i.frozen).length;
+  document.getElementById("stats").innerHTML =
+    `<span style="color:#c8f060">${arr.length}</span> varer · `+
+    `<span style="color:#f0c860">${soon}</span> snart · `+
+    `<span style="color:#f06060">${exp}</span> udl. · `+
+    `<span style="color:#60b8f0">${froz}</span> frost`;
+}
+
+function renderAlert() {
+  const warn = sortedItems().filter(i=>!i.frozen&&daysUntil(i.date)<=3);
+  const banner = document.getElementById("alertBanner");
+  if (warn.length) {
+    banner.style.display = "flex";
+    document.getElementById("alertText").textContent =
+      warn.map(i=>`${i.name} (${expiryLabel(daysUntil(i.date),false)})`).join(" · ");
+  } else {
+    banner.style.display = "none";
+  }
+}
+
+function renderTabs() {
+  const bar = document.getElementById("tabBar");
+  const allCats = [{id:"alle",name:"Alle",emoji:"",color:"#c8f060"}, ...cats];
+  bar.innerHTML = allCats.map(c=>`
+    <button class="tab${activeTab===c.id?" active":""}" data-cat="${c.id}" style="${activeTab===c.id?`background:${c.color};color:#0c0c0b;border-color:${c.color}`:''}">
+      ${c.emoji?`<span style="margin-right:4px">${c.emoji}</span>`:""}${c.name}
+    </button>`).join("");
+  bar.querySelectorAll(".tab").forEach(btn=>{
+    btn.onclick = ()=>{ activeTab=btn.dataset.cat; renderTabs(); renderList(); };
+  });
+}
+
+function renderList() {
+  const list = document.getElementById("itemList");
+  const arr = sortedItems().filter(i=> activeTab==="alle" || i.catId===activeTab);
+  if (!arr.length) {
+    const cat = cats.find(c=>c.id===activeTab);
+    list.innerHTML = `<div class="empty"><div class="empty-icon">${activeTab==="alle"?"🛒":cat?.emoji||"📦"}</div><p>${activeTab==="alle"?"Ingen varer endnu.<br>Tryk + for at tilføje":"Ingen varer i denne kategori"}</p></div>`;
+    return;
+  }
+  list.innerHTML = arr.map((item,idx)=>{
+    const cat  = getCat(item.catId);
+    const days = daysUntil(item.date);
+    const ec   = expiryColor(days, item.frozen);
+    const barW = item.frozen ? 10 : days<0?100:Math.max(5,100-Math.round(days/30*100));
+    return `<div class="item-card" style="animation-delay:${idx*0.04}s">
+      <div class="item-img" style="background:#1e1e1c">
+        ${item.img?`<img src="${item.img}" alt="">`:`<span>${cat.emoji}</span>`}
+        ${item.frozen?`<div class="frost-badge">❄️</div>`:""}
+      </div>
+      <div class="item-body">
+        <div class="item-top">
+          <div class="item-name">${item.name}</div>
+          <button class="del-btn" data-key="${item._key}">×</button>
+        </div>
+        <div class="item-meta">
+          <span class="cat-badge" style="background:${cat.color}22;color:${cat.color}">${cat.name}</span>
+          <span style="font-size:0.7rem;font-weight:500;color:${ec}">${expiryLabel(days,item.frozen)}</span>
+        </div>
+        <div class="expiry-bar"><div style="height:100%;width:${barW}%;border-radius:2px;background:${ec};transition:width .3s"></div></div>
+      </div>
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".del-btn").forEach(btn=>{
+    btn.onclick = ()=>{ remove(ref(db,"items/"+btn.dataset.key)); };
+  });
+}
+
+function renderCatGrid() {
+  const grid = document.getElementById("catGrid");
+  if (!grid) return;
+  grid.innerHTML = cats.map(c=>`
+    <div class="cat-opt" data-id="${c.id}" data-color="${c.color}">
+      <span style="font-size:1.2rem;display:block;margin-bottom:3px">${c.emoji}</span>${c.name}
+    </div>`).join("");
+  grid.querySelectorAll(".cat-opt").forEach(el=>{
+    el.onclick = ()=>{
+      grid.querySelectorAll(".cat-opt").forEach(x=>{ x.classList.remove("selected"); x.style.borderColor=""; x.style.color=""; });
+      el.classList.add("selected");
+      el.style.borderColor = el.dataset.color;
+      el.style.color       = el.dataset.color;
+      window._selectedCatId = el.dataset.id;
+    };
+  });
+}
+
+function renderAdminCatList() {
+  const el = document.getElementById("adminCatList");
+  el.innerHTML = cats.map(c=>{
+    const isDefault = DEFAULT_CATS.some(d=>d.id===c.id);
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:11px;background:#222220;border:1px solid #2e2e2c;margin-bottom:7px">
+      <span style="font-size:1.2rem">${c.emoji}</span>
+      <span style="flex:1;font-weight:500;font-size:0.9rem">${c.name}</span>
+      <span style="width:10px;height:10px;border-radius:50%;background:${c.color};display:inline-block"></span>
+      ${!isDefault
+        ? `<button class="rm-cat-btn" data-id="${c.id}" style="background:rgba(240,96,96,0.15);border:1px solid rgba(240,96,96,0.3);color:#f06060;border-radius:8px;padding:3px 9px;font-size:0.75px;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:0.73rem">Fjern</button>`
+        : `<span style="font-size:0.63rem;color:#3a3a38;letter-spacing:.04em">STANDARD</span>`}
+    </div>`;
+  }).join("");
+  el.querySelectorAll(".rm-cat-btn").forEach(btn=>{
+    btn.onclick = async ()=>{
+      const newCats = cats.filter(c=>c.id!==btn.dataset.id);
+      await set(ref(db,"cats"), Object.fromEntries(newCats.map(c=>[c.id,c])));
+    };
+  });
+}
+
+// ── LOGO DOUBLE-TAP ─────────────────────────
+window.handleLogoTap = function() {
+  logoTaps++;
+  if (logoTaps===2) {
+    logoTaps=0; clearTimeout(logoTimer);
+    document.getElementById("adminSheet").classList.add("open");
+    renderAdminCatList();
+  } else {
+    logoTimer = setTimeout(()=>{ logoTaps=0; }, 500);
+  }
+};
+
+// ── ADD ITEM ─────────────────────────────────
+window._selectedCatId = null;
+window._imgData = null;
+window._frozen = false;
+
+window.handleImage = function(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    window._imgData = ev.target.result;
+    const prev = document.getElementById("camPreview");
+    prev.src = ev.target.result; prev.style.display="block";
+    document.getElementById("camPlaceholder").style.display="none";
+  };
+  r.readAsDataURL(file);
+};
+
+window.toggleFrost = function() {
+  window._frozen = !window._frozen;
+  const tog = document.getElementById("frostToggle");
+  const knob = document.getElementById("frostKnob");
+  const lbl = document.getElementById("frostLabel");
+  tog.style.background  = window._frozen ? "#60b8f0" : "#2e2e2c";
+  knob.style.left       = window._frozen ? "18px" : "3px";
+  lbl.style.color       = window._frozen ? "#60b8f0" : "#f0ede6";
+  document.getElementById("frostBox").style.borderColor = window._frozen ? "#60b8f0" : "#2e2e2c";
+  document.getElementById("frostBox").style.background  = window._frozen ? "rgba(96,184,240,0.08)" : "#222220";
+};
+
+window.addItem = async function() {
+  const name  = document.getElementById("nameInput").value.trim();
+  const date  = document.getElementById("dateInput").value;
+  const catId = window._selectedCatId;
+  if (!name)  { alert("Skriv et varenavn"); return; }
+  if (!date)  { alert("Vælg en udløbsdato"); return; }
+  if (!catId) { alert("Vælg en kategori"); return; }
+  const item = { name, date, catId, frozen: window._frozen, img: window._imgData||null, addedAt: new Date().toISOString() };
+  await push(ref(db,"items"), item);
+  // reset
+  document.getElementById("nameInput").value = "";
+  document.getElementById("dateInput").value = "";
+  window._selectedCatId = null; window._imgData = null; window._frozen = false;
+  document.getElementById("camPreview").style.display = "none";
+  document.getElementById("camPlaceholder").style.display = "flex";
+  document.getElementById("frostBox").style.borderColor="#2e2e2c";
+  document.getElementById("frostBox").style.background="#222220";
+  document.getElementById("frostToggle").style.background="#2e2e2c";
+  document.getElementById("frostKnob").style.left="3px";
+  document.getElementById("frostLabel").style.color="#f0ede6";
+  document.querySelectorAll(".cat-opt").forEach(x=>{x.classList.remove("selected");x.style.borderColor="";x.style.color="";});
+  closeSheet("addSheet");
+};
+
+window.addCat = async function() {
+  const name  = document.getElementById("newCatName").value.trim();
+  const emoji = document.getElementById("newCatEmoji").value.trim() || "🍽️";
+  if (!name) return;
+  const colors = ["#f0a060","#60f0c8","#f060a0","#a0f060","#6080f0"];
+  const id = name.toLowerCase().replace(/\s+/g,"_")+"_"+Date.now();
+  const newCat = { id, name, emoji, color: colors[Math.floor(Math.random()*colors.length)] };
+  const updated = [...cats, newCat];
+  await set(ref(db,"cats"), Object.fromEntries(updated.map(c=>[c.id,c])));
+  document.getElementById("newCatName").value="";
+  document.getElementById("newCatEmoji").value="";
+  renderAdminCatList();
+};
+
+// ── SHEET HELPERS ────────────────────────────
+window.openSheet  = id => { document.getElementById(id).classList.add("open"); if(id==="addSheet") renderCatGrid(); };
+window.closeSheet = id => { document.getElementById(id).classList.remove("open"); };
+
+// Init
+renderTabs();
+</script>
+
+<style>
+:root {
+  --bg:#0c0c0b; --s1:#161614; --s2:#1e1e1c; --s3:#222220;
+  --b1:#2e2e2c; --b2:#3a3a38;
+  --t1:#f0ede6; --t2:#a0a09a; --t3:#5a5a58;
+  --acc:#c8f060;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:var(--bg);color:var(--t1);font-family:'DM Sans',sans-serif;overscroll-behavior:none}
+::-webkit-scrollbar{display:none}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.5)}
+
+@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* HEADER */
+.header{position:sticky;top:0;z-index:100;background:var(--bg);border-bottom:1px solid var(--b1);padding:13px 17px 9px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.logo-emoji{font-size:1.5rem}
+.logo-text{font-family:'Syne',sans-serif;font-weight:800;font-size:1.3rem;letter-spacing:-.03em;color:var(--acc)}
+.header-stats{text-align:right;font-size:.68rem;color:var(--t3);line-height:1.6}
+.sync-row{font-size:.62rem;color:#2a2a28;letter-spacing:.02em}
+
+/* ALERT */
+.alert-banner{margin:8px 14px 0;padding:9px 13px;border-radius:11px;background:rgba(240,96,96,.1);border:1px solid rgba(240,96,96,.2);font-size:.75rem;color:#f06060;display:none;align-items:flex-start;gap:7px;line-height:1.5}
+
+/* TABS */
+.tabs{display:flex;gap:4px;padding:10px 14px;overflow-x:auto;scrollbar-width:none}
+.tab{flex-shrink:0;padding:5px 12px;border-radius:20px;font-size:.75rem;font-weight:500;cursor:pointer;background:var(--s1);color:var(--t3);border:1px solid var(--b1);white-space:nowrap;font-family:'DM Sans',sans-serif;transition:all .15s}
+.tab.active{background:var(--acc);color:#0c0c0b;border-color:var(--acc)}
+
+/* LIST */
+.list{padding:10px 14px 110px;display:flex;flex-direction:column;gap:9px}
+.item-card{background:var(--s1);border:1px solid var(--b1);border-radius:14px;overflow:hidden;display:flex;animation:fadeIn .2s ease both}
+.item-img{width:70px;height:70px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:2rem;overflow:hidden;position:relative}
+.item-img img{width:100%;height:100%;object-fit:cover}
+.frost-badge{position:absolute;bottom:2px;right:2px;font-size:.85rem}
+.item-body{flex:1;padding:9px 11px;min-width:0}
+.item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px}
+.item-name{font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.del-btn{flex-shrink:0;width:24px;height:24px;border-radius:7px;background:transparent;border:1px solid var(--b1);color:var(--t3);font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;transition:all .15s}
+.del-btn:active{background:#f06060;color:#fff;border-color:#f06060}
+.item-meta{margin-top:4px;display:flex;align-items:center;gap:7px}
+.cat-badge{font-size:.62rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:10px}
+.expiry-bar{margin-top:6px;height:2px;border-radius:2px;background:var(--b1);overflow:hidden}
+.empty{text-align:center;padding:60px 20px;color:var(--t3)}
+.empty-icon{font-size:3rem;margin-bottom:14px;opacity:.3}
+.empty p{font-size:.85rem;line-height:1.7}
+
+/* FAB */
+.fab{position:fixed;bottom:22px;right:18px;width:56px;height:56px;border-radius:17px;background:var(--acc);color:#0c0c0b;font-size:1.5rem;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(200,240,96,.3);z-index:200;transition:transform .15s}
+.fab:active{transform:scale(.92)}
+
+/* SHEETS */
+.overlay{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.65);display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .2s}
+.overlay.open{opacity:1;pointer-events:all}
+.sheet{width:100%;background:#1a1a18;border-radius:22px 22px 0 0;padding:18px 18px 44px;transform:translateY(100%);transition:transform .25s cubic-bezier(.32,.72,0,1);max-height:92vh;overflow-y:auto}
+.overlay.open .sheet{transform:translateY(0)}
+.sheet-handle{width:34px;height:4px;border-radius:4px;background:var(--b1);margin:0 auto 18px}
+.sheet-title{font-family:'Syne',sans-serif;font-weight:800;font-size:1.15rem;margin-bottom:18px}
+
+/* FORM */
+.field{margin-top:13px}
+.field label{font-size:.7rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--t3);display:block;margin-bottom:6px}
+.field input{width:100%;padding:11px 13px;background:var(--s3);border:1px solid var(--b1);border-radius:11px;color:var(--t1);font-family:'DM Sans',sans-serif;font-size:.92rem;outline:none;transition:border-color .15s}
+.field input:focus{border-color:var(--acc)}
+.field input::placeholder{color:var(--t3)}
+
+/* CAMERA */
+.cam-area{width:100%;height:150px;border-radius:14px;background:var(--s3);border:2px dashed var(--b1);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;cursor:pointer;overflow:hidden;position:relative}
+.cam-area:active{border-color:var(--acc)}
+#camPreview{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none}
+#camPlaceholder{display:flex;flex-direction:column;align-items:center;gap:6px}
+
+/* FROST BOX */
+.frost-box{margin-top:13px;padding:11px 14px;border-radius:11px;border:1px solid var(--b1);background:var(--s3);cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:all .15s}
+.frost-box:active{transform:scale(.98)}
+.frost-toggle{width:38px;height:22px;border-radius:11px;background:var(--b1);position:relative;transition:background .2s;flex-shrink:0}
+#frostKnob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:white;transition:left .2s}
+
+/* CAT GRID */
+.cat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.cat-opt{padding:9px 7px;border-radius:11px;background:var(--s3);border:2px solid var(--b1);color:var(--t1);font-size:.76rem;font-weight:500;cursor:pointer;text-align:center;line-height:1.4;transition:all .15s}
+.cat-opt:active{transform:scale(.96)}
+.cat-opt.selected{background:transparent}
+
+/* SUBMIT */
+.btn-submit{width:100%;padding:15px;background:var(--acc);color:#0c0c0b;border:none;border-radius:13px;font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;cursor:pointer;margin-top:18px}
+.btn-submit:active{opacity:.85}
+
+/* SETUP SCREEN */
+.setup-overlay{position:fixed;inset:0;z-index:1000;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px;text-align:center}
+.setup-overlay.hidden{display:none}
+.setup-card{background:var(--s1);border:1px solid var(--b1);border-radius:20px;padding:28px 22px;max-width:360px;width:100%}
+.setup-card h2{font-family:'Syne',sans-serif;font-weight:800;font-size:1.3rem;margin-bottom:8px;color:var(--acc)}
+.setup-card p{font-size:.83rem;color:var(--t2);line-height:1.6;margin-bottom:20px}
+.setup-card input{width:100%;padding:11px 13px;background:var(--s3);border:1px solid var(--b1);border-radius:11px;color:var(--t1);font-family:'DM Sans',sans-serif;font-size:.9rem;outline:none;margin-bottom:10px}
+.setup-card .hint{font-size:.72rem;color:var(--t3);line-height:1.5;margin-bottom:18px;text-align:left;background:var(--s3);padding:11px 13px;border-radius:10px}
+.setup-card .hint a{color:var(--acc);text-decoration:none}
+</style>
+</head>
+<body>
+
+<!-- SETUP SCREEN (vises første gang) -->
+<div class="setup-overlay" id="setupOverlay">
+  <div class="setup-card">
+    <div style="font-size:2.5rem;margin-bottom:12px">🥦</div>
+    <h2>Madlager opsætning</h2>
+    <p>For at synkronisere med din kæreste skal du oprette en gratis Firebase-database og indsætte URL'en herunder.</p>
+    <div class="hint">
+      1. Gå til <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a><br>
+      2. Opret nyt projekt → Realtime Database → Opret database<br>
+      3. Vælg "Start i testfunktion" (30 dage, nok til at komme i gang)<br>
+      4. Kopiér database-URL'en (ser sådan ud:<br>
+      <span style="color:#c8f060;font-size:.7rem">https://PROJEKT-default-rtdb.europe-west1.firebasedatabase.app</span>)
+    </div>
+    <input type="url" id="dbUrlInput" placeholder="https://dit-projekt-default-rtdb…" autocomplete="off" autocorrect="off" spellcheck="false">
+    <button class="btn-submit" style="margin-top:6px" onclick="saveDbUrl()">Gem og start</button>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" style="display:none">
+
+  <div class="header">
+    <div class="logo" onclick="handleLogoTap()">
+      <span class="logo-emoji">🥦</span>
+      <span class="logo-text">Madlager</span>
+    </div>
+    <div class="header-stats">
+      <div id="stats">Indlæser…</div>
+      <div class="sync-row">⟳ <span id="syncTime">–</span></div>
+    </div>
+  </div>
+
+  <div class="alert-banner" id="alertBanner">
+    ⚠️ <span id="alertText"></span>
+  </div>
+
+  <div class="tabs" id="tabBar"></div>
+
+  <div class="list" id="itemList">
+    <div class="empty"><div class="empty-icon" style="animation:spin 1s linear infinite">⟳</div><p>Forbinder…</p></div>
+  </div>
+
+  <button class="fab" onclick="openSheet('addSheet')">＋</button>
+
+  <!-- ADD SHEET -->
+  <div class="overlay" id="addSheet" onclick="if(event.target===this)closeSheet('addSheet')">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">Tilføj vare</div>
+
+      <label for="fileInput" class="cam-area">
+        <img id="camPreview" alt="">
+        <div id="camPlaceholder">
+          <span style="font-size:2rem;opacity:.4">📷</span>
+          <span style="font-size:.8rem;color:var(--t3)">Tryk for at tage billede</span>
+        </div>
+      </label>
+      <input type="file" id="fileInput" accept="image/*" capture="environment" onchange="handleImage(event)" style="display:none">
+
+      <div class="field">
+        <label>Varenavn</label>
+        <input type="text" id="nameInput" placeholder="f.eks. Gulerødder, Hakket oksekød…">
+      </div>
+
+      <div class="field">
+        <label>Udløbsdato</label>
+        <input type="date" id="dateInput">
+      </div>
+
+      <div class="frost-box" id="frostBox" onclick="toggleFrost()">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="font-size:1.2rem">❄️</span>
+          <div>
+            <div style="font-size:.88rem;font-weight:500" id="frostLabel">På frost</div>
+            <div style="font-size:.7rem;color:var(--t3)">Udløbsdato tæller ikke ned</div>
+          </div>
+        </div>
+        <div class="frost-toggle" id="frostToggle"><div id="frostKnob"></div></div>
+      </div>
+
+      <div class="field">
+        <label>Kategori</label>
+        <div class="cat-grid" id="catGrid"></div>
+      </div>
+
+      <button class="btn-submit" onclick="addItem()">Gem vare</button>
+    </div>
+  </div>
+
+  <!-- ADMIN SHEET -->
+  <div class="overlay" id="adminSheet" onclick="if(event.target===this)closeSheet('adminSheet')">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.15rem">🔧 Kategorier</div>
+        <button onclick="closeSheet('adminSheet')" style="background:transparent;border:none;color:var(--t3);font-size:1.4rem;cursor:pointer;line-height:1">×</button>
+      </div>
+      <div id="adminCatList"></div>
+      <div style="padding:14px;border-radius:12px;background:var(--s3);border:1px solid var(--b1);margin-top:4px">
+        <div style="font-size:.7rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--t3);margin-bottom:10px">Ny kategori</div>
+        <div style="display:flex;gap:8px;margin-bottom:9px">
+          <input id="newCatEmoji" placeholder="🍽️" style="width:52px;padding:9px;background:#2a2a28;border:1px solid var(--b1);border-radius:9px;color:var(--t1);font-size:1.1rem;outline:none;text-align:center">
+          <input id="newCatName" placeholder="Kategorinavn…" style="flex:1;padding:9px 12px;background:#2a2a28;border:1px solid var(--b1);border-radius:9px;color:var(--t1);font-family:'DM Sans',sans-serif;font-size:.88rem;outline:none">
+        </div>
+        <button onclick="addCat()" style="width:100%;padding:11px;background:var(--acc);color:#0c0c0b;border:none;border-radius:10px;font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;cursor:pointer">Tilføj kategori</button>
+      </div>
+      <div style="margin-top:16px;padding:11px 13px;border-radius:10px;background:rgba(200,240,96,.05);border:1px solid rgba(200,240,96,.1);font-size:.72rem;color:var(--t3);line-height:1.6">
+        💡 Database-URL: <span id="dbUrlDisplay" style="color:var(--acc);word-break:break-all;font-size:.68rem"></span><br>
+        <span onclick="resetDb()" style="color:#f06060;cursor:pointer;text-decoration:underline">Skift database</span>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+// ── DB URL SETUP ─────────────────────────────
+function saveDbUrl() {
+  const url = document.getElementById("dbUrlInput").value.trim();
+  if (!url.startsWith("https://")) { alert("Indsæt en gyldig Firebase database-URL"); return; }
+  localStorage.setItem("madlager_db_url", url);
+  location.reload();
+}
+function resetDb() {
+  if (confirm("Skift database-URL?")) { localStorage.removeItem("madlager_db_url"); location.reload(); }
+}
+
+const savedUrl = localStorage.getItem("madlager_db_url");
+if (!savedUrl) {
+  document.getElementById("setupOverlay").classList.remove("hidden");
+} else {
+  document.getElementById("setupOverlay").classList.add("hidden");
+  document.getElementById("app").style.display = "block";
+  document.getElementById("dbUrlDisplay").textContent = savedUrl;
+
+  // Dynamically set the Firebase databaseURL from saved value
+  // We reload the module script with correct config
+  const scriptEl = document.querySelector('script[type="module"]');
+  const src = scriptEl.textContent;
+  const patched = src.replace(
+    'databaseURL: "https://DIT_PROJEKT-default-rtdb.europe-west1.firebasedatabase.app"',
+    `databaseURL: "${savedUrl}"`
+  );
+  const blob = new Blob([patched], {type:"text/javascript"});
+  const modScript = document.createElement("script");
+  modScript.type = "module";
+  modScript.src = URL.createObjectURL(blob);
+  document.head.appendChild(modScript);
+
+  // Set today min date
+  document.addEventListener("DOMContentLoaded", ()=>{
+    const di = document.getElementById("dateInput");
+    if (di) di.min = new Date().toISOString().split("T")[0];
+  });
+}
+</script>
+</body>
+</html>
