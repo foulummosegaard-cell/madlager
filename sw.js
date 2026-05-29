@@ -1,4 +1,4 @@
-const VERSION = "v1";
+const VERSION = "v3";
 const CACHE = "madlager-" + VERSION;
 
 self.addEventListener("install", e => {
